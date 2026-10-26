@@ -80,6 +80,7 @@ _RETRY_STATE_LIMIT = 1000
 _CHANNEL_QUEUE_LIMIT = _DISCOVERY_PAGE_SIZE // 2
 _DISCOVERY_PAGE_DELAY_SECONDS = 0.01
 _DISCOVERY_TIMEOUT_SECONDS = 2.0
+_COUNT_POLL_SECONDS = 0.5
 _SPAWN_SIGTERM_GRACE_SECONDS = 1.0
 _WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 ProcessingKey = tuple[str, str]
@@ -114,6 +115,9 @@ class ArtifactProcessingBinding:
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
     pending_provider: ArtifactProcessingPendingProvider | None = None
+    # Count-triggered bindings have no clock schedule; poll their durable
+    # requested generations while the Supervisor holds the Lease.
+    poll_requested: bool = False
     # Only automatic admission is filtered; already accepted requests retain
     # their own Worker authorization and domain completion semantics.
     automatic_scope_filter: Callable[[AsyncConnection, tuple[str, ...]], Awaitable[frozenset[str]]] | None = None
@@ -661,7 +665,7 @@ class ArtifactProcessingSupervisor:
         capacity = self._fresh_capacity(state)
         if capacity <= 0:
             return
-        if not state.discovery_pending and self._lease_mode == "single-process":
+        if not state.discovery_pending and self._lease_mode == "single-process" and not state.binding.poll_requested:
             return
         if state.requested_after == 0:
             state.notification_at_start = self._notifications
@@ -1083,6 +1087,8 @@ class ArtifactProcessingSupervisor:
         for state in self._families.values():
             if len(state.running) >= state.binding.max_workers:
                 continue
+            if state.binding.poll_requested:
+                deadlines.append(now + _COUNT_POLL_SECONDS)
             deadlines.extend(
                 retry.deadline
                 for scope, retry in state.retries.items()

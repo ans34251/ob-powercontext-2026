@@ -585,6 +585,7 @@ async def open_builtin_runtime(
             BuiltinRuntime(
                 code_service=await resources.enter_async_context(open_code_service(config.code, config.database)),
                 provider=contexts,
+                database=contexts.database,
                 capabilities=RuntimeCapabilities(
                     memory_extraction=contexts.memory_extraction,
                     experience_generation=contexts.experience_generation,
@@ -719,6 +720,10 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
         "profile": config.runtime.profile_schedule_enabled or None,
         "skill": None,
     }
+    count_thresholds = {
+        "memory": config.runtime.memory_source_count_threshold,
+        "topic-memory": config.runtime.topic_memory_source_count_threshold,
+    }
     for family, schedule in automatic.items():
         if schedule is not None and family not in declared | registered:
             if (
@@ -787,6 +792,7 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
                 if family == "skill"
                 else SourceProcessingPendingProvider(contexts.database, binding, family),
                 automatic_scope_filter=enabled_profile_scopes if family == "profile" else None,
+                poll_requested=count_thresholds.get(family) is not None,
             )
         )
     _validate_processing_registrations(configured)
@@ -948,6 +954,8 @@ async def open_builtin_contexts(
                 model_usage_write_timeout_seconds=config.runtime.model_usage_write_timeout_seconds,
                 model_usage_flush_timeout_seconds=config.runtime.model_usage_flush_timeout_seconds,
                 source_registry=source_registry,
+                memory_source_count_threshold=config.runtime.memory_source_count_threshold,
+                topic_memory_source_count_threshold=config.runtime.topic_memory_source_count_threshold,
                 cursor_secret=cursor_secret,
                 tracing=tracing,
             )
@@ -1025,6 +1033,8 @@ async def open_builtin_contexts(
             model_usage_write_timeout_seconds=config.runtime.model_usage_write_timeout_seconds,
             model_usage_flush_timeout_seconds=config.runtime.model_usage_flush_timeout_seconds,
             source_registry=source_registry,
+            memory_source_count_threshold=config.runtime.memory_source_count_threshold,
+            topic_memory_source_count_threshold=config.runtime.topic_memory_source_count_threshold,
             cursor_secret=cursor_secret,
             tracing=tracing,
         )

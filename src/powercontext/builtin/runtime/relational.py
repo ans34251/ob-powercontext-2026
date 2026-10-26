@@ -537,6 +537,8 @@ class RelationalContexts:
         handoff_artifact_id: str = "handoff",
         memory_artifact_id: str = "memory",
         source_registry: SourceDefinitionRegistry | None = None,
+        memory_source_count_threshold: int | None = None,
+        topic_memory_source_count_threshold: int | None = None,
         cursor_secret: bytes | None = None,
         tracing: RuntimeTracing | None = None,
         prompt_registry: PromptRegistry | None = None,
@@ -551,10 +553,21 @@ class RelationalContexts:
         self.database = database
         self.scopes = ScopeApplication(database, cursor_secret=cursor_secret)
         self.source_registry = source_registry or BUILTIN_SOURCE_REGISTRY
+        self._memory_source_count_threshold = memory_source_count_threshold
         self.index = NoMemoryIndex() if index is None else index
         self.topic_memory_index = NoTopicMemoryIndex() if topic_memory_index is None else topic_memory_index
         self.experience_index = NoExperienceIndex() if experience_index is None else experience_index
-        source_repository = SourceRepository(self.source_registry)
+        source_repository = SourceRepository(
+            self.source_registry,
+            source_count_triggers={
+                binding_name: threshold
+                for binding_name, threshold in (
+                    (SOURCE_WINDOW_TRIGGER_NAME, memory_source_count_threshold),
+                    (TOPIC_MEMORY_SOURCE_WINDOW_BINDING, topic_memory_source_count_threshold),
+                )
+                if threshold is not None
+            },
+        )
         artifact_repository = ArtifactRepository(
             (Handoff, Memory, Experience, Skill, Profile, Prompt, TopicMemory),
             sources=source_repository,
@@ -1367,6 +1380,7 @@ class RelationalContexts:
             services=services,
             lock=self._activation_locks.setdefault(services.scope_id, asyncio.Lock()),
             tracing=self._tracing,
+            source_count_threshold=self._memory_source_count_threshold,
         ).flush(limit=limit, processing=processing, authorize_snapshot=authorize_snapshot, on_commit=on_commit)
 
     async def incubate_experience(
@@ -1404,6 +1418,7 @@ class RelationalContexts:
             services=services,
             lock=self._activation_locks.setdefault(scope, asyncio.Lock()),
             tracing=self._tracing,
+            source_count_threshold=self._memory_source_count_threshold,
         )
         context: PowerContext[BuiltinSources, BuiltinArtifacts, BuiltinTriggers] = PowerContext(
             sources=BuiltinSources(
@@ -1610,10 +1625,12 @@ class _RelationalTriggers:
         services: _ScopedServices,
         lock: asyncio.Lock,
         tracing: RuntimeTracing | None = None,
+        source_count_threshold: int | None = None,
     ) -> None:
         self._services = services
         self._lock = lock
         self._tracing = tracing
+        self._source_count_threshold = source_count_threshold
         self._handoff_trigger = HandoffTrigger()
         self._prompt_context = ScopedPrompts(services.prompts, services.scope_id)
         self._trigger = SourceWindowTrigger()
@@ -1750,6 +1767,7 @@ class _RelationalTriggers:
                         await on_commit(connection, before, updated)
                     if processing is not None:
                         await processing.complete(connection, remaining_work=action.through < high_watermark)
+                    await self._request_count_processing(connection)
             return MemoryFlushResult(
                 previous_cursor=action.after,
                 high_watermark=high_watermark,
@@ -1759,6 +1777,30 @@ class _RelationalTriggers:
                 held_count=1 if held else 0,
                 hold_codes=_hold_codes(prepared),
             )
+
+    async def _request_count_processing(self, connection: AsyncConnection) -> None:
+        """Re-evaluate remaining journal identities after a successful window."""
+
+        if self._source_count_threshold is None:
+            return
+        head = await self._services.repositories.sources.journal_position(connection, self._services.scope_id)
+        cursor = await self._services.repositories.cursors.load(
+            connection,
+            self._services.scope_id,
+            SOURCE_WINDOW_TRIGGER_NAME,
+        )
+        remaining = head - (0 if cursor is None else cursor.cursor.sequence)
+        if remaining < self._source_count_threshold:
+            return
+        intents = ArtifactProcessingIntentRepository()
+        intent = await intents.load(
+            connection,
+            self._services.scope_id,
+            SOURCE_WINDOW_TRIGGER_NAME,
+            for_update=True,
+        )
+        if intent is None or intent.requested_generation == intent.handled_generation:
+            await intents.request(connection, self._services.scope_id, SOURCE_WINDOW_TRIGGER_NAME)
 
     async def _sources(
         self,

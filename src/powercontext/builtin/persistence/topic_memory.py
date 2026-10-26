@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -40,6 +41,7 @@ from powercontext.builtin.artifacts.topic_memory import (
     TopicMemoryDraft,
     TopicMemoryProjection,
     TopicMemoryProjectionError,
+    TopicMemorySearchChannels,
     TopicMemorySearchMode,
     TopicMemorySearchRequest,
     TopicMemorySearchResult,
@@ -50,6 +52,7 @@ from powercontext.builtin.artifacts.topic_memory import (
 from powercontext.builtin.artifacts.topic_memory.fusion import _fuse_topic_memory_rankings
 from powercontext.builtin.persistence.artifacts import ArtifactRepository
 from powercontext.builtin.persistence.errors import InvalidRepositoryArgumentError
+from powercontext.builtin.persistence.source_lifecycle import unavailable_topic_ids
 from powercontext.builtin.persistence.supervision import database_utc_now
 from powercontext.builtin.persistence.tables import (
     ARTIFACT_HEADS_TABLE,
@@ -487,6 +490,9 @@ class TopicMemoryRepository:
             admission=admission,
         )
         channels = await self.index.search(connection, scope_id, request)
+        withheld = await unavailable_topic_ids(connection, scope_id)
+        if withheld:
+            channels = _without_withheld_topics(channels, withheld)
         await self._check_retrieval_shape(connection)
         outcome = _fuse_topic_memory_rankings(query, channels, limit, mode=used_mode, admission=admission)
         return TopicMemorySearchResult(
@@ -767,6 +773,29 @@ class TopicMemoryRepository:
             )
         except ValueError:
             raise TopicMemoryCapabilityError("embedding-vector", "query vector is invalid") from None
+
+
+def _without_withheld_topics(
+    channels: TopicMemorySearchChannels,
+    withheld: frozenset[str],
+) -> TopicMemorySearchChannels:
+    def keep(hits: tuple[Any, ...]) -> tuple[Any, ...]:
+        return tuple(hit for hit in hits if hit.artifact_ref.artifact_id not in withheld)
+
+    return TopicMemorySearchChannels(
+        topic_fts=keep(channels.topic_fts),
+        topic_vector=keep(channels.topic_vector),
+        detail_fts=keep(channels.detail_fts),
+        detail_vector=keep(channels.detail_vector),
+        topic_fts_retrieved=channels.topic_fts_retrieved,
+        topic_vector_retrieved=channels.topic_vector_retrieved,
+        detail_fts_retrieved=channels.detail_fts_retrieved,
+        detail_vector_retrieved=channels.detail_vector_retrieved,
+        topic_fts_eligible=channels.topic_fts_eligible,
+        topic_vector_eligible=channels.topic_vector_eligible,
+        detail_fts_eligible=channels.detail_fts_eligible,
+        detail_vector_eligible=channels.detail_vector_eligible,
+    )
 
 
 def _aware_utc(value: object) -> datetime:

@@ -706,6 +706,23 @@ SOURCE_DEFINITION_MANIFESTS_TABLE = Table(
     UniqueConstraint("definition_name", "fingerprint", name="uq_pc_source_definition_manifest_fingerprint"),
 )
 
+SOURCE_LIFECYCLE_NODES_TABLE = Table(
+    "pc_source_lifecycle_nodes",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(MAX_SOURCE_ID_LENGTH), primary_key=True),
+    Column("family", identity_string(16), nullable=False),
+    Column("reference", _entry_text_type(), nullable=False),
+    Column("parents", _entry_text_type(), nullable=False),
+    Column("policy", identity_string(8), nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("available", Boolean, nullable=False),
+    Column("last_sequence", Integer, nullable=True),
+    Column("last_event_digest", identity_string(64), nullable=True),
+    CheckConstraint("family IN ('source', 'memory', 'topic')", name="ck_pc_source_lifecycle_family"),
+    CheckConstraint("policy IN ('all', 'any')", name="ck_pc_source_lifecycle_policy"),
+)
+
 EXTERNAL_SKILL_REGISTRATIONS_TABLE = Table(
     "pc_external_skill_registrations",
     SHARED_METADATA,
@@ -919,6 +936,7 @@ SHARED_TABLES = (
     ARTIFACT_PROCESSING_MIGRATION_RECEIPTS_TABLE,
     CONNECTOR_CHECKPOINTS_TABLE,
     SOURCE_DEFINITION_MANIFESTS_TABLE,
+    SOURCE_LIFECYCLE_NODES_TABLE,
     EXTERNAL_SKILL_REGISTRATIONS_TABLE,
     SKILL_PACKAGES_TABLE,
     AGENT_SKILL_TARGETS_TABLE,

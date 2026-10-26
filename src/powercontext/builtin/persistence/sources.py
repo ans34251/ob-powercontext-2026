@@ -30,6 +30,7 @@ from powercontext.builtin.artifacts.experience import EXPERIENCE_INCUBATION_CURS
 from powercontext.builtin.artifacts.profile.models import PROFILE_SOURCE_WINDOW_BINDING
 from powercontext.builtin.artifacts.topic_memory import TOPIC_MEMORY_SOURCE_WINDOW_BINDING
 from powercontext.builtin.persistence.codec import load_model, stored_bytes
+from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.errors import (
     IdentityMismatchError,
     InvalidRepositoryArgumentError,
@@ -79,12 +80,15 @@ class SourceRepository:
         self,
         definitions: SourceDefinitionRegistry | Iterable[_AnySourceAdapter],
         /,
+        *,
+        source_count_triggers: Mapping[str, int] | None = None,
     ) -> None:
         self._registry = (
             definitions
             if isinstance(definitions, SourceDefinitionRegistry)
             else SourceDefinitionRegistry.from_adapters(definitions)
         )
+        self._source_count_triggers = dict(source_count_triggers or {})
 
     async def add(
         self,
@@ -171,7 +175,27 @@ class SourceRepository:
         intents = ArtifactProcessingIntentRepository()
         for binding_name in SOURCE_PROCESSING_BINDINGS:
             await intents.mark_dirty(connection, scope_id, binding_name)
+        await self._request_count_triggers(connection, scope_id, position)
         return StoredSource(ref=ref, value=source, journal_position=position), True
+
+    async def _request_count_triggers(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        position: int,
+    ) -> None:
+        if not self._source_count_triggers:
+            return
+        cursors = SourceCursorRepository()
+        intents = ArtifactProcessingIntentRepository()
+        for binding_name, threshold in self._source_count_triggers.items():
+            cursor = await cursors.load(connection, scope_id, binding_name)
+            pending = position - (0 if cursor is None else cursor.cursor.sequence)
+            if pending < threshold:
+                continue
+            intent = await intents.load(connection, scope_id, binding_name, for_update=True)
+            if intent is None or intent.requested_generation == intent.handled_generation:
+                await intents.request(connection, scope_id, binding_name)
 
     async def get(
         self,
