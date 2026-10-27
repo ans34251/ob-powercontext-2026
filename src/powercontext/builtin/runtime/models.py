@@ -234,6 +234,9 @@ class PrepareContextRequest(_PreparedContextModel):
     max_bytes: Annotated[int, Field(ge=512, le=32768)] = 8000
     assembly: ContextAssembly | None = None
     include_code: bool = Field(default=False, strict=True)
+    # Opt-in to picking literal fragments out of the recalled Memory bodies instead of
+    # fitting whole entries. Defaults to off so ordinary prepare keeps its behaviour.
+    evidence_selection: bool = Field(default=False, strict=True)
 
     @model_validator(mode="before")
     @classmethod

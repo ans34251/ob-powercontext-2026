@@ -247,6 +247,12 @@ class CompositeMemoryIndex:
         request: MemorySearchRequest,
         /,
     ) -> MemorySearchChannels:
+        # A native hybrid strategy answers both channels from a single statement, so it
+        # takes the whole request instead of being merged with the per-channel indexes.
+        if request.mode == "hybrid":
+            for index in self.indexes:
+                if getattr(index, "native_hybrid", False):
+                    return await index.search(connection, scope_id, request)
         fts: tuple[MemoryChannelHit, ...] = ()
         vector: tuple[MemoryChannelHit, ...] = ()
         for index in self.indexes:
