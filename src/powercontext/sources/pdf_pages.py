@@ -725,6 +725,18 @@ async def search_pdf_pages(
             citations[key] = _hit_citation(hit)
             keys.append(key)
         variant_hits[name] = keys
+    # Filings are retrieved from one database that holds several documents, and every memory
+    # entry starts with its document id. A question names the company it asks about, so the
+    # document whose id matches the question is the only one that can hold the evidence;
+    # narrowing the pool keeps other filings from crowding out its pages.
+    target = _target_document(question, texts)
+    if target is not None:
+        narrowed = {
+            name: [key for key in keys if _document_of(texts.get(key, "")) == target]
+            for name, keys in variant_hits.items()
+        }
+        if sum(len(keys) for keys in narrowed.values()) >= limit:
+            variant_hits = narrowed
     selected, ordered = _select_hit_keys(question, variant_hits, texts, weights, limit)
     if not selected:
         return ()
@@ -776,6 +788,39 @@ async def search_pdf_pages(
         seen_pages.add((document_id, page_number))
         results.append(citations[key])
     return tuple(results)
+
+
+def _document_of(text: str) -> str:
+    """Return the document id a Memory entry starts with, or "" when absent."""
+
+    head, separator, _ = text.partition("\n")
+    return head if separator else ""
+
+
+def _target_document(question: str, texts: dict[_HitKey, str]) -> str | None:
+    """Pick the filing a question names, using only the ids already present in the hits."""
+
+    words = _words(question)
+    tokens = set(words)
+    joined = "".join(words)
+    scores: dict[str, int] = {}
+    for text in texts.values():
+        document_id = _document_of(text)
+        if not document_id:
+            continue
+        parts = [
+            part
+            for part in re.split(r"[^a-z0-9]+", document_id.casefold())
+            if part and not part.isdigit() and part not in {"k", "fy", "q1", "q2", "q3", "q4"}
+        ]
+        score = sum(1 for part in parts if part in tokens or (len(part) >= 6 and part in joined))
+        if score:
+            scores[document_id] = max(scores.get(document_id, 0), score)
+    if not scores:
+        return None
+    best = max(scores.values())
+    winners = [document_id for document_id, score in scores.items() if score == best]
+    return winners[0] if len(winners) == 1 else None
 
 
 def _page_identity(source_id: str) -> tuple[str, int, str] | None:
