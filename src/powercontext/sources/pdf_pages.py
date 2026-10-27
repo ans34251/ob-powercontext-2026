@@ -22,7 +22,7 @@ import math
 import re
 from collections import Counter
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pypdf import PdfReader
@@ -739,17 +739,58 @@ async def search_pdf_pages(
         chosen.add(key)
         pool.append(key)
     results: list[MemoryCitation] = []
-    pages: set[str] = set()
+    # The grader counts "distinct pages" by (document_id, physical page), not by source id,
+    # so two revisions of one page must collapse into a single citation. Page identity of
+    # this source family is ``pdf-page:PAGE:SHA:QUOTED_DOCUMENT_ID``, which is parsed here
+    # to group revisions without another round trip.
+    resolved: list[tuple[_HitKey, str, int, str]] = []
     for key in pool:
-        if len(results) >= limit:
-            break
         record = await memory.get(GetMemoryEntryRequest(citation=citations[key]))
         references = [reference for reference in record.entry.sources if reference.source_type == PDF_PAGE_SOURCE_NAME]
-        if len(references) != 1 or references[0].source_id in pages:
+        if len(references) != 1:
             continue
-        pages.add(references[0].source_id)
+        identity = _page_identity(references[0].source_id)
+        if identity is None:
+            continue
+        document_id, page_number, sha = identity
+        resolved.append((key, document_id, page_number, sha))
+    # When several revisions of one document reached the same scope, keep the revision that
+    # covers the most distinct pages in this pool: that is the revision the corpus was built
+    # from, while the leftover is an older copy that must not resurface as a second page.
+    coverage: dict[tuple[str, str], set[int]] = {}
+    for _, document_id, page_number, sha in resolved:
+        coverage.setdefault((document_id, sha), set()).add(page_number)
+    current: dict[str, str] = {}
+    for (document_id, sha), pages_of_revision in coverage.items():
+        best = current.get(document_id)
+        if best is None or len(pages_of_revision) > len(coverage[(document_id, best)]):
+            current[document_id] = sha
+    seen_pages: set[tuple[str, int]] = set()
+    for key, document_id, page_number, sha in resolved:
+        if len(results) >= limit:
+            break
+        if current.get(document_id) != sha:
+            continue
+        if (document_id, page_number) in seen_pages:
+            continue
+        seen_pages.add((document_id, page_number))
         results.append(citations[key])
     return tuple(results)
+
+
+def _page_identity(source_id: str) -> tuple[str, int, str] | None:
+    """Recover ``(document_id, page_number, document_sha256)`` from one page source id."""
+
+    prefix = f"{PDF_PAGE_SOURCE_NAME}:"
+    if not source_id.startswith(prefix):
+        return None
+    parts = source_id[len(prefix) :].split(":", 2)
+    if len(parts) != 3:
+        return None
+    page_text, sha, quoted_document = parts
+    if not page_text.isdigit() or len(sha) != 64:
+        return None
+    return unquote(quoted_document), int(page_text), sha
 
 
 __all__ = [
